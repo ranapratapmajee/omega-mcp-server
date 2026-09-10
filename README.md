@@ -68,7 +68,7 @@ Agents require deterministic output formats to reliably decide whether to contin
 ```text
 omega-mcp-server/
 ├── Dockerfile
-├── docker-compose.yml
+├── docker-compose.yaml
 ├── pyproject.toml
 ├── .dockerignore
 ├── README.md
@@ -198,16 +198,16 @@ class QueryRecordsTool(BaseTool):
 
 ### Reloading After Adding a Tool
 
-* **Local Dev:** Stop the server (`Ctrl+C`) and run `uv run python -m mcp_server.server`.
+* **Local Dev:** Restart the server process (`uv run python -m mcp_server.server`).
 * **Docker:** Run `docker compose restart`.
 
-The registry will automatically detect `QueryRecordsTool`, bind its typed arguments, and expose it across `/sse`.
+The registry dynamically discovers `QueryRecordsTool`, extracts its parameter types, and exposes it over `/sse`.
 
 ---
 
 ## 6. Client Integration via SSE
 
-External agents and clients connect via standard SSE transport:
+External projects interact with Omega MCP Server through the SSE URL:
 
 ```text
 http://<host>:8080/sse
@@ -244,9 +244,7 @@ if __name__ == "__main__":
 
 ```
 
-### IDE / Agent Client Configuration
-
-To hook this server directly into tools like Claude Desktop or Cursor:
+### IDE / Developer Tool Configuration (Claude Desktop, Cursor)
 
 ```json
 {
@@ -261,7 +259,167 @@ To hook this server directly into tools like Claude Desktop or Cursor:
 
 ---
 
-## 7. Common Operations
+## 7. Calling Tools from Other Agentic AI Projects
+
+When integrating Omega MCP Server tools into external agent pipelines, choose the integration method suited to your tech stack:
+
+### Pattern A: LangChain & LangGraph Agents
+
+Use `langchain-mcp-adapters` to automatically convert Omega MCP tools into LangChain tools for agents.
+
+**1. Install dependency in the agent project:**
+
+```bash
+uv add langchain-mcp-adapters langchain-openai
+
+```
+
+**2. Load tools into an agent loop:**
+
+```python
+import asyncio
+from langchain_mcp_adapters.client import MultiServerMCPClient
+from langchain_openai import ChatOpenAI
+
+
+async def run_agent():
+    async with MultiServerMCPClient(
+        {
+            "omega_server": {
+                "url": "http://localhost:8080/sse",
+                "transport": "sse",
+            }
+        }
+    ) as client:
+        # Automatically converts MCP tools to LangChain BaseTools
+        tools = client.get_tools()
+
+        llm = ChatOpenAI(model="gpt-4o-mini")
+        agent = llm.bind_tools(tools)
+
+        # Agent decides to invoke 'get_system_status' or 'calculate_sum'
+        response = await agent.ainvoke("Check current system metrics and calculate 42 * 8.")
+        print(response)
+
+
+if __name__ == "__main__":
+    asyncio.run(run_agent())
+
+```
+
+---
+
+### Pattern B: Custom Python Agent / Microservice (Reusable Wrapper)
+
+For custom agents that need fine-grained control over tool execution and `AgentResponse` parsing without external agent frameworks:
+
+```python
+import asyncio
+import json
+from contextlib import asynccontextmanager
+from typing import Any, Dict
+from mcp.client.session import ClientSession
+from mcp.client.sse import sse_client
+
+
+class OmegaToolClient:
+    """Reusable client for invoking Omega MCP tools over SSE."""
+
+    def __init__(self, sse_url: str = "http://localhost:8080/sse"):
+        self.sse_url = sse_url
+
+    @asynccontextmanager
+    async def session(self):
+        async with sse_client(self.sse_url) as (read_stream, write_stream):
+            async with ClientSession(read_stream, write_stream) as sess:
+                await sess.initialize()
+                yield sess
+
+    async def list_available_tools(self) -> list[Dict[str, Any]]:
+        async with self.session() as sess:
+            res = await sess.list_tools()
+            return [
+                {
+                    "name": t.name,
+                    "description": t.description,
+                    "parameters": t.inputSchema,
+                }
+                for t in res.tools
+            ]
+
+    async def execute_tool(self, tool_name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
+        async with self.session() as sess:
+            result = await sess.call_tool(tool_name, arguments=arguments)
+            raw_payload = result.content[0].text
+            # Parse standardized AgentResponse JSON
+            return json.loads(raw_payload)
+
+
+# Example execution inside an agent loop
+async def main():
+    client = OmegaToolClient("http://localhost:8080/sse")
+
+    # Fetch available tool definitions for LLM prompt/tool-binding
+    tools = await client.list_available_tools()
+    print("Fetched tools for agent:", [t["name"] for t in tools])
+
+    # Invoke tool directly when the agent makes a tool-call decision
+    response = await client.execute_tool(
+        "calculate_sum",
+        arguments={"a": 10.5, "b": 22.3}
+    )
+
+    if response.get("success"):
+        print("Tool Output:", response["data"])
+        print("Summary for Context:", response["summary"])
+    else:
+        print("Tool Failed:", response["error"])
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+
+```
+
+---
+
+### Pattern C: Docker-to-Docker Integration (Containerized Agents)
+
+When your agent runs in another Docker container on the same host machine, communicate via a shared Docker network instead of `localhost`:
+
+1. **Create a shared network:**
+```bash
+docker network create ai-network
+
+```
+
+
+2. **Connect Omega MCP Server (`docker-compose.yaml`):**
+```yaml
+services:
+  omega-mcp-server:
+    # ...
+    networks:
+      - ai-network
+
+networks:
+  ai-network:
+    external: true
+
+```
+
+
+3. **In the agent container, connect using the service name:**
+```python
+client = OmegaToolClient(sse_url="http://omega_mcp_server:8080/sse")
+
+```
+
+
+
+---
+
+## 8. Common Operations
 
 | Command | Action |
 | --- | --- |
