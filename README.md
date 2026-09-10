@@ -1,21 +1,21 @@
 # Omega MCP Server
 
-A modular, production-grade Model Context Protocol (MCP) server built with Python (`mcp 2.x`) and `MCPServer`. Designed to serve reusable, self-documenting tools to autonomous agents, multi-agent frameworks, and external services over **Server-Sent Events (SSE)** using an enterprise-ready **Class-Based Tool Registry**.
+A modular, production-grade Model Context Protocol (MCP) server built with Python (`mcp 2.x`) and `MCPServer`. It exposes self-documenting, reusable tools to autonomous agents, multi-agent frameworks, and external services over **Server-Sent Events (SSE)** using an enterprise-ready **Class-Based Tool Registry**.
 
 ---
 
 ## 1. Architectural Overview
 
-Omega MCP Server acts as a centralized, decoupled tool provider across consumer projects:
+Omega MCP Server acts as a centralized tool provider across consumer projects:
 
-- **SSE Transport:** Exposes an SSE stream at `/sse` and a JSON-RPC execution endpoint at `/messages/`.
-- **Class-Based Registry Pattern:** Every tool inherits from an abstract `BaseTool` class, enforcing schema validation via Pydantic and explicit typing without circular dependencies.
-- **Dynamic Auto-Discovery:** Modules placed inside `src/mcp_server/tools/` are scanned and loaded via Python reflection (`pkgutil` and `inspect`) on startup.
-- **Predictable Agent Envelope:** All tools wrap execution output in a typed `AgentResponse` contract (`success`, `data`, `error`, `summary`) tailored for LLM reasoning loops.
+- **SSE Transport:** Runs an HTTP service exposing an SSE stream at `/sse` and a JSON-RPC message endpoint at `/messages/`.
+- **Class-Based Registry:** Every tool inherits from `BaseTool`, ensuring strict schema validation via Pydantic and eliminating circular import risks.
+- **Dynamic Autodiscovery:** Modules placed in `src/mcp_server/tools/` are scanned and registered on startup using Python inspection (`pkgutil` and `inspect`).
+- **Predictable Agent Envelope:** All tools wrap execution output in a typed `AgentResponse` contract (`success`, `data`, `error`, `summary`) optimized for LLM reasoning loops.
 
 ```text
 ┌─────────────────────────────────────────────────────────────┐
-│  Client Projects (LangGraph, CrewAI, Custom Agents, IDEs)   │
+│  Client Projects (Custom Agents, LangGraph, CrewAI, IDEs)   │
 └──────────────────────────────┬──────────────────────────────┘
                                │ SSE (http://<host>:8080/sse)
                                ▼
@@ -36,7 +36,7 @@ Omega MCP Server acts as a centralized, decoupled tool provider across consumer 
 
 ## 2. Standardized Agent Contract (`AgentResponse`)
 
-Agents require deterministic output formats to reliably decide whether to continue execution, retry, or surface findings. All tools return the `AgentResponse` contract defined in `src/mcp_server/common.py`.
+Agents need deterministic responses to evaluate tool outcomes and plan subsequent actions. All tools return the `AgentResponse` schema defined in `src/mcp_server/common.py`.
 
 ### Response Schema
 
@@ -57,9 +57,9 @@ Agents require deterministic output formats to reliably decide whether to contin
 | Field | Type | Description |
 | --- | --- | --- |
 | `success` | `bool` | Execution status flag. |
-| `data` | `dict | list | null` | Machine-readable payload for downstream tasks or LLM analysis. |
-| `error` | `string | null` | Error trace or message on failure; `null` on success. |
-| `summary` | `string | null` | Short summary for LLM context windows and chain-of-thought steps. |
+| `data` | `dict | list | str | null` | Machine-readable payload for downstream tasks or LLM reasoning. |
+| `error` | `string | null` | Error message on failure; `null` on success. |
+| `summary` | `string | null` | Brief summary for LLM context windows (optional). |
 
 ---
 
@@ -73,14 +73,14 @@ omega-mcp-server/
 ├── .dockerignore
 ├── README.md
 ├── scripts/
-│   └── mcp_client_test.py     # End-to-end verification client test script
+│   └── mcp_client_test.py     # Verification client test script
 └── src/
     └── mcp_server/
         ├── __init__.py
         ├── common.py          # Standard AgentResponse contract model
         ├── registry.py        # BaseTool ABC & ToolRegistry engine
         ├── server.py          # MCPServer bootstrap & adapter binding
-        └── tools/             # Class-based tool modules (drop new tools here)
+        └── tools/             # Class-based tool modules
             ├── __init__.py
             ├── system.py      # SystemStatusTool (host inspection)
             └── math.py        # CalculateSumTool (arithmetic computation)
@@ -121,21 +121,21 @@ uv run python -m scripts.mcp_client_test
 
 ### Running with Docker
 
-1. **Build and start the container:**
+1. **Build and launch the container:**
 ```bash
 docker compose up --build -d
 
 ```
 
 
-2. **Inspect logs and verify loaded tools:**
+2. **Check logs and verify loaded tools:**
 ```bash
 docker compose logs -f
 
 ```
 
 
-3. **Verify the SSE stream:**
+3. **Inspect the SSE endpoint:**
 ```bash
 curl -N http://localhost:8080/sse
 
@@ -145,22 +145,20 @@ curl -N http://localhost:8080/sse
 
 ---
 
-## 5. Adding New Tools Over Time
+## 5. Adding New Tools
 
-The server uses an auto-discovery engine. Adding a new tool requires **zero modifications** to `server.py` or `registry.py`.
+The auto-discovery engine scans `src/mcp_server/tools/` on boot. Adding a tool requires no modifications to `server.py` or `registry.py`.
 
-### The 4 Rules Every Tool Must Follow
+### The 4 Rules for Every Tool
 
-1. **Inherit from `BaseTool`:** Subclass `BaseTool` from `mcp_server.registry`.
-2. **Define an Explicit Input Schema:** Create a Pydantic `BaseModel` using `Field(..., description="...")` for every parameter so LLMs understand valid inputs.
+1. **Subclass `BaseTool`:** Inherit from `BaseTool` in `mcp_server.registry`.
+2. **Define an Input Schema:** Create a Pydantic `BaseModel` using `Field(..., description="...")` for each parameter.
 3. **Set Class Attributes:** Provide `name`, `description`, and `args_schema`.
-4. **Wrap Outputs in `AgentResponse`:** Always wrap successful returns in `AgentResponse.ok()` and catch exceptions with `AgentResponse.fail()`.
+4. **Wrap Output in `AgentResponse`:** Return `AgentResponse.ok()` on success and catch exceptions with `AgentResponse.fail()`.
 
 ---
 
-### Step-by-Step Example: Adding a Database Tool
-
-Create a new file: `src/mcp_server/tools/database.py`:
+### Implementation Template: `src/mcp_server/tools/<tool_name>.py`
 
 ```python
 from typing import Any
@@ -169,26 +167,26 @@ from mcp_server.common import AgentResponse
 from mcp_server.registry import BaseTool
 
 
-# Step 1: Define the strict input schema for LLM agents
-class QueryRecordsInput(BaseModel):
-    table: str = Field(..., description="Target database table to read from")
-    limit: int = Field(default=10, description="Maximum number of records to return")
+# 1. Define input parameters and descriptions
+class CustomToolInput(BaseModel):
+    query: str = Field(..., description="Input query or target argument")
+    limit: int = Field(default=5, description="Maximum number of items to return")
 
 
-# Step 2: Implement the tool subclassing BaseTool
-class QueryRecordsTool(BaseTool):
-    name = "query_records"
-    description = "Query structured records from a specified database table."
-    args_schema = QueryRecordsInput
+# 2. Implement the tool class
+class CustomTool(BaseTool):
+    name = "custom_tool"
+    description = "Detailed explanation of what the tool accomplishes."
+    args_schema = CustomToolInput
 
-    async def run(self, table: str, limit: int = 10) -> dict:
+    async def run(self, query: str, limit: int = 5) -> dict:
         try:
-            # Execution logic (e.g. database client query)
-            records = [{"id": i, "table": table} for i in range(1, limit + 1)]
+            # Core execution logic
+            result_payload = {"echo": query, "count": limit}
 
             return AgentResponse.ok(
-                data={"rows": records, "count": len(records)},
-                summary=f"Retrieved {len(records)} records from '{table}'."
+                data=result_payload,
+                summary=f"Processed query '{query}' with limit {limit}."
             ).model_dump()
 
         except Exception as exc:
@@ -196,222 +194,176 @@ class QueryRecordsTool(BaseTool):
 
 ```
 
-### Reloading After Adding a Tool
+### Reloading
 
-* **Local Dev:** Restart the server process (`uv run python -m mcp_server.server`).
+* **Local:** Restart the process (`uv run python -m mcp_server.server`).
 * **Docker:** Run `docker compose restart`.
 
-The registry dynamically discovers `QueryRecordsTool`, extracts its parameter types, and exposes it over `/sse`.
+---
+
+## 6. Consuming Tools from External Agentic AI Projects
+
+To keep agent workflows decoupled from MCP networking logic, use a two-layer structure:
+
+1. `mcp_client.py`: Manages SSE transport, session lifecycle, and maps tools to standard callables.
+2. `agent.py`: Imports and binds the callables directly into the agent.
 
 ---
 
-## 6. Client Integration via SSE
+### Step 1: Create the Reusable Client Adapter (`mcp_client.py`)
 
-External projects interact with Omega MCP Server through the SSE URL:
-
-```text
-http://<host>:8080/sse
-
-```
-
-### Python Client Example (`scripts/mcp_client_test.py`)
-
-```python
-import asyncio
-from mcp.client.session import ClientSession
-from mcp.client.sse import sse_client
-
-
-async def main():
-    async with sse_client("http://localhost:8080/sse") as (read_stream, write_stream):
-        async with ClientSession(read_stream, write_stream) as session:
-            await session.initialize()
-
-            # 1. Discover registered tools
-            tools = await session.list_tools()
-            print("Available Tools:", [t.name for t in tools.tools])
-
-            # 2. Call a tool
-            result = await session.call_tool(
-                "get_system_status",
-                arguments={"include_memory": True}
-            )
-            print("\nTool Output:", result.content[0].text)
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
-
-```
-
-### IDE / Developer Tool Configuration (Claude Desktop, Cursor)
-
-```json
-{
-  "mcpServers": {
-    "omega-mcp": {
-      "url": "http://localhost:8080/sse"
-    }
-  }
-}
-
-```
-
----
-
-## 7. Calling Tools from Other Agentic AI Projects
-
-When integrating Omega MCP Server tools into external agent pipelines, choose the integration method suited to your tech stack:
-
-### Pattern A: LangChain & LangGraph Agents
-
-Use `langchain-mcp-adapters` to automatically convert Omega MCP tools into LangChain tools for agents.
-
-**1. Install dependency in the agent project:**
-
-```bash
-uv add langchain-mcp-adapters langchain-openai
-
-```
-
-**2. Load tools into an agent loop:**
-
-```python
-import asyncio
-from langchain_mcp_adapters.client import MultiServerMCPClient
-from langchain_openai import ChatOpenAI
-
-
-async def run_agent():
-    async with MultiServerMCPClient(
-        {
-            "omega_server": {
-                "url": "http://localhost:8080/sse",
-                "transport": "sse",
-            }
-        }
-    ) as client:
-        # Automatically converts MCP tools to LangChain BaseTools
-        tools = client.get_tools()
-
-        llm = ChatOpenAI(model="gpt-4o-mini")
-        agent = llm.bind_tools(tools)
-
-        # Agent decides to invoke 'get_system_status' or 'calculate_sum'
-        response = await agent.ainvoke("Check current system metrics and calculate 42 * 8.")
-        print(response)
-
-
-if __name__ == "__main__":
-    asyncio.run(run_agent())
-
-```
-
----
-
-### Pattern B: Custom Python Agent / Microservice (Reusable Wrapper)
-
-For custom agents that need fine-grained control over tool execution and `AgentResponse` parsing without external agent frameworks:
+Place this file inside your consumer project. It connects over SSE, executes remote tools, and extracts the payload from `AgentResponse`.
 
 ```python
 import asyncio
 import json
-from contextlib import asynccontextmanager
-from typing import Any, Dict
+import os
+from typing import Any, Callable, Dict, List
 from mcp.client.session import ClientSession
 from mcp.client.sse import sse_client
 
+DEFAULT_SSE_URL = os.getenv("OMEGA_MCP_URL", "http://localhost:8080/sse")
 
-class OmegaToolClient:
-    """Reusable client for invoking Omega MCP tools over SSE."""
 
-    def __init__(self, sse_url: str = "http://localhost:8080/sse"):
+class OmegaMCPClient:
+    """Manages SSE connection and execution for remote MCP tools."""
+
+    def __init__(self, sse_url: str = DEFAULT_SSE_URL):
         self.sse_url = sse_url
 
-    @asynccontextmanager
-    async def session(self):
+    async def execute_tool(self, tool_name: str, arguments: Dict[str, Any]) -> str:
+        """Call remote tool over SSE and unwrap the AgentResponse envelope."""
         async with sse_client(self.sse_url) as (read_stream, write_stream):
-            async with ClientSession(read_stream, write_stream) as sess:
-                await sess.initialize()
-                yield sess
+            async with ClientSession(read_stream, write_stream) as session:
+                await session.initialize()
+                response = await session.call_tool(tool_name, arguments=arguments)
+                raw_text = response.content[0].text
 
-    async def list_available_tools(self) -> list[Dict[str, Any]]:
-        async with self.session() as sess:
-            res = await sess.list_tools()
-            return [
-                {
-                    "name": t.name,
-                    "description": t.description,
-                    "parameters": t.inputSchema,
-                }
-                for t in res.tools
-            ]
+                try:
+                    payload = json.loads(raw_text)
+                    if not payload.get("success", False):
+                        return f"Tool Error ({tool_name}): {payload.get('error')}"
+                    return str(payload.get("data"))
+                except (json.JSONDecodeError, AttributeError):
+                    return raw_text
 
-    async def execute_tool(self, tool_name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
-        async with self.session() as sess:
-            result = await sess.call_tool(tool_name, arguments=arguments)
-            raw_payload = result.content[0].text
-            # Parse standardized AgentResponse JSON
-            return json.loads(raw_payload)
+    async def list_tools(self) -> List[str]:
+        """Query available tool names exposed by the server."""
+        async with sse_client(self.sse_url) as (read_stream, write_stream):
+            async with ClientSession(read_stream, write_stream) as session:
+                await session.initialize()
+                res = await session.list_tools()
+                return [t.name for t in res.tools]
 
 
-# Example execution inside an agent loop
-async def main():
-    client = OmegaToolClient("http://localhost:8080/sse")
-
-    # Fetch available tool definitions for LLM prompt/tool-binding
-    tools = await client.list_available_tools()
-    print("Fetched tools for agent:", [t["name"] for t in tools])
-
-    # Invoke tool directly when the agent makes a tool-call decision
-    response = await client.execute_tool(
-        "calculate_sum",
-        arguments={"a": 10.5, "b": 22.3}
-    )
-
-    if response.get("success"):
-        print("Tool Output:", response["data"])
-        print("Summary for Context:", response["summary"])
-    else:
-        print("Tool Failed:", response["error"])
+# Shared client instance
+client = OmegaMCPClient()
 
 
-if __name__ == "__main__":
-    asyncio.run(main())
+def create_agent_tool(name: str, description: str = "") -> Callable:
+    """Factory that produces a generic callable compatible with agent frameworks."""
+
+    async def async_dispatch(**kwargs) -> str:
+        return await client.execute_tool(name, kwargs)
+
+    def dispatch(**kwargs) -> str:
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+
+        if loop and loop.is_running():
+            import nest_asyncio
+            nest_asyncio.apply()
+            return loop.run_until_complete(async_dispatch(**kwargs))
+        else:
+            return asyncio.run(async_dispatch(**kwargs))
+
+    dispatch.__name__ = name
+    dispatch.__doc__ = description or f"Executes the remote MCP tool '{name}'."
+    return dispatch
+
+
+# Map remote tools to standard Python callables
+get_system_status = create_agent_tool(
+    name="get_system_status",
+    description="Retrieves current host CPU and memory usage statistics."
+)
+
+calculate_sum = create_agent_tool(
+    name="calculate_sum",
+    description="Calculates the sum of two numbers (a, b)."
+)
 
 ```
 
 ---
 
-### Pattern C: Docker-to-Docker Integration (Containerized Agents)
+### Step 2: Inject Tools into Your Agent (`agent.py`)
 
-When your agent runs in another Docker container on the same host machine, communicate via a shared Docker network instead of `localhost`:
+The agent imports the tool functions like native Python functions.
+
+```python
+import os
+# Replace with your framework's imports (Google GenAI, LangChain, CrewAI, AutoGen, etc.)
+from your_agent_framework import Agent, llm
+
+# Import pre-configured callables from the MCP client adapter
+from mcp_client import calculate_sum, get_system_status
+
+generic_agent = Agent(
+    name="GenericTaskAgent",
+    description="Executes tasks using modular tools served over MCP.",
+    model=llm,
+    tools=[get_system_status, calculate_sum],
+    instruction="""You are a task execution agent.
+    When asked about system metrics or arithmetic operations, call the appropriate 
+    registered tool and summarize the result cleanly for the user.
+    """
+)
+
+if __name__ == "__main__":
+    # Example invocation
+    prompt = "Check current system resources and calculate 45 + 55."
+    print(f"User Request: {prompt}\n")
+
+    # Run agent according to your framework API:
+    # response = generic_agent.run(prompt)
+    # print(response)
+
+```
+
+---
+
+### Step 3: Containerized Agent Communication (Docker-to-Docker)
+
+When running both Omega MCP Server and your agent inside Docker, communicate using Docker's bridge network:
 
 1. **Create a shared network:**
 ```bash
-docker network create ai-network
+docker network create agent-network
 
 ```
 
 
-2. **Connect Omega MCP Server (`docker-compose.yaml`):**
+2. **Attach Omega MCP Server in `docker-compose.yaml`:**
 ```yaml
 services:
   omega-mcp-server:
     # ...
     networks:
-      - ai-network
+      - agent-network
 
 networks:
-  ai-network:
+  agent-network:
     external: true
 
 ```
 
 
-3. **In the agent container, connect using the service name:**
-```python
-client = OmegaToolClient(sse_url="http://omega_mcp_server:8080/sse")
+3. **In the agent container, set the environment variable:**
+```bash
+OMEGA_MCP_URL=http://omega_mcp_server:8080/sse
 
 ```
 
@@ -419,7 +371,7 @@ client = OmegaToolClient(sse_url="http://omega_mcp_server:8080/sse")
 
 ---
 
-## 8. Common Operations
+## 7. Common Operations
 
 | Command | Action |
 | --- | --- |
